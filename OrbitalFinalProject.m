@@ -137,3 +137,25 @@ xlabel('Time (min)')
 ylabel('|r| (km)')
 legend('Analytical', 'Numerical', 'Location', 'best')
 title('Radius Magnitude vs Time')
+
+#### NATHANS PART TO GET TO MOON!!!!###################################
+clc
+clear all
+
+% 1. Set your Launch Date (Straight into the code)
+launch_date = datetime(2026, 4, 1, 12, 0, 0); % April 7, 2026, at Noon
+
+% 2. Define your travel time in seconds (e.g., 5 days)
+t = 432000; 
+
+arrival_jd = juliandate(launch_date);
+
+% 4. Get the Moon's Position (rB_vec) from the Ephemeris
+[rB_vec, v_moon] = planetEphemeris(arrival_jd, 'Earth', 'Moon');
+
+moonr = rB_vec;
+moonv = v_moon;
+mu = 4.035*10^14;
+ri = [6563.136, 0, 0];
+vi = [0,6.849, 3.719];
+[rB_vec,vA_vec,vB_vec,delVA] = Chase(ri, vi, moonr, moonv,t, mu, 'p');
