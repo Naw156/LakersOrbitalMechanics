@@ -138,24 +138,230 @@ ylabel('|r| (km)')
 legend('Analytical', 'Numerical', 'Location', 'best')
 title('Radius Magnitude vs Time')
 
-#### NATHANS PART TO GET TO MOON!!!!###################################
-clc
-clear all
+%%%%%%%%%% TLI
+%% ---------------- PART 3: HOHMANN-LIKE TRANSLUNAR INJECTION ----------------
 
-% 1. Set your Launch Date (Straight into the code)
-launch_date = datetime(2026, 4, 1, 12, 0, 0); % April 7, 2026, at Noon
+muM = 4902.800066;      % km^3/s^2, Moon
+RM  = 1737.4;           % km
 
-% 2. Define your travel time in seconds (e.g., 5 days)
-t = 432000; 
+% Mean Earth-Moon distance for first-order patched-conic estimate
+r_moon = 384400;        % km
 
-arrival_jd = juliandate(launch_date);
+% Initial orbit: circular parking orbit
+rA  = rpark;
+rAp = rpark;
 
-% 4. Get the Moon's Position (rB_vec) from the Ephemeris
-[rB_vec, v_moon] = planetEphemeris(arrival_jd, 'Earth', 'Moon');
+% Target orbit for Hohmann function:
+% circular Earth-centered orbit at Moon distance
+rB  = r_moon;
+rBp = r_moon;
 
-moonr = rB_vec;
-moonv = v_moon;
-mu = 4.035*10^14;
-ri = [6563.136, 0, 0];
-vi = [0,6.849, 3.719];
-[rB_vec,vA_vec,vB_vec,delVA] = Chase(ri, vi, moonr, moonv,t, mu, 'p');
+[delV1, delV2, t_trans] = Hohmann(rA, rAp, rB, rBp, muE);
+
+fprintf('\n--- Hohmann-like Translunar Injection ---\n')
+fprintf('Parking orbit radius           = %.6f km\n', rpark)
+fprintf('Target radius                  = %.6f km\n', r_moon)
+fprintf('TLI Delta-V                    = %.6f km/s\n', delV1)
+fprintf('Hohmann circularization Delta-V= %.6f km/s\n', delV2)
+fprintf('Transfer time to apogee        = %.6f s\n', t_trans)
+fprintf('Transfer time to apogee        = %.6f hr\n', t_trans/3600)
+fprintf('Transfer time to apogee        = %.6f days\n', t_trans/86400)
+
+%% ---------------- PART 4: POST-TLI STATE ----------------
+% Apply the TLI burn tangentially to the current parking-orbit velocity
+vhat0 = v0_vec / norm(v0_vec);
+
+rTLI_vec = r0_vec;
+vTLI_vec = v0_vec + delV1 * vhat0;
+
+fprintf('\nPost-TLI departure state:\n')
+fprintf('rTLI = [%.6f %.6f %.6f] km\n', rTLI_vec(1), rTLI_vec(2), rTLI_vec(3))
+fprintf('vTLI = [%.6f %.6f %.6f] km/s\n', vTLI_vec(1), vTLI_vec(2), vTLI_vec(3))
+
+%% ---------------- PART 5: TRANSFER ORBIT CHECKS ----------------
+a_trans = (rpark + r_moon)/2;
+e_trans = (r_moon - rpark)/(r_moon + rpark);
+
+v_circ_LEO      = sqrt(muE/rpark);
+v_perigee_trans = sqrt(muE*(2/rpark - 1/a_trans));
+v_apogee_trans  = sqrt(muE*(2/r_moon - 1/a_trans));
+v_moon_circ     = sqrt(muE/r_moon);
+
+v_inf_moon = abs(v_moon_circ - v_apogee_trans);
+
+fprintf('\nTransfer-orbit properties:\n')
+fprintf('a_transfer                    = %.6f km\n', a_trans)
+fprintf('e_transfer                    = %.10f\n', e_trans)
+fprintf('LEO circular speed            = %.6f km/s\n', v_circ_LEO)
+fprintf('Transfer perigee speed        = %.6f km/s\n', v_perigee_trans)
+fprintf('Transfer apogee speed         = %.6f km/s\n', v_apogee_trans)
+fprintf('Approx Moon orbital speed     = %.6f km/s\n', v_moon_circ)
+fprintf('Approx arrival v_infinity     = %.6f km/s\n', v_inf_moon)
+
+%% ---------------- PART 6: LUNAR CAPTURE ESTIMATE ----------------
+h_perilune = 100;               % km target perilune altitude
+rp_moon    = RM + h_perilune;   % km
+
+v_perilune_hyp = sqrt(v_inf_moon^2 + 2*muM/rp_moon);
+v_circ_moon    = sqrt(muM/rp_moon);
+delV_capture   = v_perilune_hyp - v_circ_moon;
+
+fprintf('\n--- Lunar Capture Estimate ---\n')
+fprintf('Target perilune altitude      = %.6f km\n', h_perilune)
+fprintf('Hyperbolic perilune speed     = %.6f km/s\n', v_perilune_hyp)
+fprintf('Circular lunar-orbit speed    = %.6f km/s\n', v_circ_moon)
+fprintf('Capture Delta-V               = %.6f km/s\n', delV_capture)
+fprintf('Approx total Delta-V          = %.6f km/s\n', delV1 + delV_capture)
+
+%% ---------------- PART 7: PROPAGATE THE TLI TRANSFER ----------------
+N_tli = 800;
+tspan_tli = linspace(0, t_trans, N_tli);
+
+r_tli = zeros(N_tli,3);
+v_tli = zeros(N_tli,3);
+
+for k = 1:N_tli
+    [rtemp, vtemp] = UVars(rTLI_vec, vTLI_vec, tspan_tli(k));
+    r_tli(k,:) = rtemp(:).';
+    v_tli(k,:) = vtemp(:).';
+end
+
+r_tli_end = r_tli(end,:).';
+v_tli_end = v_tli(end,:).';
+
+fprintf('\nState at transfer apogee:\n')
+fprintf('r_end = [%.6f %.6f %.6f] km\n', r_tli_end(1), r_tli_end(2), r_tli_end(3))
+fprintf('v_end = [%.6f %.6f %.6f] km/s\n', v_tli_end(1), v_tli_end(2), v_tli_end(3))
+fprintf('Final propagated radius       = %.6f km\n', norm(r_tli_end))
+fprintf('Expected Moon distance        = %.6f km\n', r_moon)
+fprintf('Radius difference             = %.6e km\n', norm(r_tli_end) - r_moon)
+
+%% ---------------- PART 8: PLOTS ----------------
+figure
+plot3(r_tli(:,1), r_tli(:,2), r_tli(:,3), 'b-', 'LineWidth', 1.5)
+hold on
+plot3(rTLI_vec(1), rTLI_vec(2), rTLI_vec(3), 'go', 'MarkerFaceColor', 'g')
+plot3(r_tli_end(1), r_tli_end(2), r_tli_end(3), 'mo', 'MarkerFaceColor', 'm')
+
+[xE,yE,zE] = sphere(100);
+surf(RE*xE, RE*yE, RE*zE, ...
+    'FaceColor', [0.6 0.8 1.0], ...
+    'EdgeColor', 'none', ...
+    'FaceAlpha', 0.35)
+
+grid on
+axis equal
+xlabel('x (km)')
+ylabel('y (km)')
+zlabel('z (km)')
+legend('TLI transfer arc', 'TLI burn point', 'Transfer apogee', 'Earth', 'Location', 'best')
+title('Hohmann-like Translunar Injection')
+view(3)
+
+figure
+plot(tspan_tli/3600, vecnorm(r_tli,2,2), 'b-', 'LineWidth', 1.5)
+grid on
+xlabel('Time (hr)')
+ylabel('|r| (km)')
+        title('Radius Magnitude During Translunar Coast')
+
+%% ---------------- PART 9: LAUNCH-TIME PHASING SWEEP ----------------
+% Goal:
+% Keep the same Hohmann-like transfer shape, but vary launch time to see
+% when the spacecraft arrives closest to the Moon's actual position.
+
+launch_date0 = datetime(2026,4,1,12,0,0);   % nominal launch date
+
+% Sweep launch time around the nominal date
+% Example: +/- 5 days in 1-hour increments
+dt_hours = -5*24 : 1 : 5*24;
+nSweep   = length(dt_hours);
+
+miss_distance = zeros(nSweep,1);
+launch_dates  = launch_date0 + hours(dt_hours);
+
+r_moon_arr_all = zeros(nSweep,3);
+r_sc_arr_all   = zeros(nSweep,3);
+
+for j = 1:nSweep
+    
+    % Candidate launch and arrival times
+    launch_date_j = launch_dates(j);
+    arrival_date_j = launch_date_j + seconds(t_trans);
+    jd_arrival_j = juliandate(arrival_date_j);
+    
+    % Moon state at arrival
+    [r_moon_arr_j, v_moon_arr_j] = planetEphemeris(jd_arrival_j,'Earth','Moon');
+    r_moon_arr_j = r_moon_arr_j(:);
+    v_moon_arr_j = v_moon_arr_j(:); %#ok<NASGU>
+    
+    % For this Hohmann-style model, the departure state is still the same
+    % parking-orbit state with the same tangential TLI burn
+    r_depart_j = rTLI_vec;
+    v_depart_j = vTLI_vec;
+    
+    % Propagate spacecraft to arrival using your existing UVars function
+    [r_sc_arr_j, v_sc_arr_j] = UVars(r_depart_j, v_depart_j, t_trans); %#ok<ASGLU>
+    r_sc_arr_j = r_sc_arr_j(:);
+    
+    % Miss distance
+    miss_distance(j) = norm(r_sc_arr_j - r_moon_arr_j);
+    
+    % Store for plotting / reporting
+    r_moon_arr_all(j,:) = r_moon_arr_j.';
+    r_sc_arr_all(j,:)   = r_sc_arr_j.';
+end
+
+% Best launch time in the sweep
+[miss_best, idx_best] = min(miss_distance);
+best_launch_date  = launch_dates(idx_best);
+best_arrival_date = best_launch_date + seconds(t_trans);
+
+fprintf('\n--- Launch-Time Phasing Sweep ---\n')
+fprintf('Nominal launch date           = %s\n', datestr(launch_date0))
+fprintf('Best launch date in sweep     = %s\n', datestr(best_launch_date))
+fprintf('Best arrival date             = %s\n', datestr(best_arrival_date))
+fprintf('Minimum miss distance         = %.6f km\n', miss_best)
+
+%% ---------------- PART 10: REPORT BEST-CASE ARRIVAL GEOMETRY ----------------
+r_sc_best   = r_sc_arr_all(idx_best,:).';
+r_moon_best = r_moon_arr_all(idx_best,:).';
+
+fprintf('\nBest-case arrival vectors:\n')
+fprintf('Spacecraft arrival position   = [%.6f %.6f %.6f] km\n', ...
+    r_sc_best(1), r_sc_best(2), r_sc_best(3))
+fprintf('Moon arrival position         = [%.6f %.6f %.6f] km\n', ...
+    r_moon_best(1), r_moon_best(2), r_moon_best(3))
+fprintf('Best miss distance            = %.6f km\n', norm(r_sc_best - r_moon_best))
+
+%% ---------------- PART 11: PLOTS FOR PHASING SWEEP ----------------
+figure
+plot(dt_hours, miss_distance, 'b-', 'LineWidth', 1.5)
+grid on
+xlabel('Launch time offset from nominal (hr)')
+ylabel('Miss distance at arrival (km)')
+title('Moon Miss Distance vs Launch-Time Offset')
+
+figure
+plot3(r_sc_arr_all(:,1), r_sc_arr_all(:,2), r_sc_arr_all(:,3), 'b.', 'MarkerSize', 10)
+hold on
+plot3(r_moon_arr_all(:,1), r_moon_arr_all(:,2), r_moon_arr_all(:,3), 'r.', 'MarkerSize', 10)
+plot3(r_sc_best(1), r_sc_best(2), r_sc_best(3), 'ko', 'MarkerFaceColor', 'k')
+plot3(r_moon_best(1), r_moon_best(2), r_moon_best(3), 'mo', 'MarkerFaceColor', 'm')
+
+[xE,yE,zE] = sphere(100);
+surf(RE*xE, RE*yE, RE*zE, ...
+    'FaceColor', [0.6 0.8 1.0], ...
+    'EdgeColor', 'none', ...
+    'FaceAlpha', 0.20)
+
+grid on
+axis equal
+xlabel('x (km)')
+ylabel('y (km)')
+zlabel('z (km)')
+legend('Spacecraft arrival points','Moon positions at arrival', ...
+       'Best spacecraft point','Best Moon point','Earth', ...
+       'Location','best')
+title('Arrival Geometry During Launch-Time Sweep')
+view(3)
