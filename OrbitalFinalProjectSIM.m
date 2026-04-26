@@ -36,9 +36,10 @@ r_landing = RM + h_landing;
 capture_radius = 10000; % km from Moon center where capture burn is attempted
 
 % Lunar Gateway / RPO inputs
-gateway_phase_deg = 20;       % Gateway is 20 deg ahead at circularization
-rpo_transfer_fraction = 0.5; % fraction of one lunar circular orbit for Chase transfer
-chase_direction = 'p';        % prograde Chase/Lambert solution
+gateway_phase_deg = 20;           % Gateway is 20 deg ahead at circularization
+rpo_phase_revs_min = 1;           % minimum phasing revolutions to attempt
+rpo_min_altitude = 20;            % km, minimum allowable RPO phasing periapsis altitude
+post_rendezvous_loiter_hr = 1.5;  % hr, coast with Gateway before deorbit
 
 %% ================================================================
 %  1. INITIAL LEO STATE
@@ -214,13 +215,21 @@ time_final_orbit_complete = time_circularization + seconds(T_circ);
 t_final_orbit_complete_mission = seconds(time_final_orbit_complete - launch_date0);
 
 %% ================================================================
-%  10A. RPO RENDEZVOUS WITH LUNAR GATEWAY USING CHASE FUNCTION
+%  10A. RPO PHASING RENDEZVOUS WITH LUNAR GATEWAY
 % ================================================================
-% Gateway is assumed to be in the same 100 km circular lunar orbit and
-% 20 degrees ahead of the spacecraft at circularization.
+% Gateway is in the same 100 km circular lunar orbit and is initially
+% 20 deg ahead of the spacecraft at circularization.
+%
+% Since the Gateway is ahead, the spacecraft drops to a slightly lower,
+% faster phasing orbit. The number of phasing revolutions is increased
+% automatically until the phasing periapsis stays above the requested
+% minimum altitude.
 
 r_rpo_start = r_peri;
 v_rpo_circ_start = v_peri_after;
+
+r_circ_rpo = norm(r_rpo_start);
+v_circ_rpo = norm(v_rpo_circ_start);
 
 hhat_orbit = cross(r_rpo_start, v_rpo_circ_start);
 hhat_orbit = hhat_orbit / norm(hhat_orbit);
@@ -229,52 +238,76 @@ hhat_orbit = hhat_orbit / norm(hhat_orbit);
 r_gateway0 = rotateAboutAxis(r_rpo_start, hhat_orbit, deg2rad(gateway_phase_deg));
 v_gateway0 = rotateAboutAxis(v_rpo_circ_start, hhat_orbit, deg2rad(gateway_phase_deg));
 
-% Choose Chase transfer time
-t_rpo = rpo_transfer_fraction * T_circ;
+% Circular orbit period and mean motion
+T_gateway = 2*pi*sqrt(r_circ_rpo^3/muM);
+
+% Gateway is ahead by phi. Spacecraft must gain phi over N phasing revs.
+phi = deg2rad(gateway_phase_deg);
+
+% Choose valid number of phasing revolutions
+rpo_phase_revs = rpo_phase_revs_min;
+
+while true
+
+    T_phase = T_gateway * (1 - phi/(2*pi*rpo_phase_revs));
+    a_phase = (muM*(T_phase/(2*pi))^2)^(1/3);
+
+    ra_phase = r_circ_rpo;
+    rp_phase = 2*a_phase - ra_phase;
+
+    if rp_phase > RM + rpo_min_altitude
+        break
+    end
+
+    rpo_phase_revs = rpo_phase_revs + 1;
+
+    if rpo_phase_revs > 50
+        error('No valid RPO phasing orbit found. Increase final lunar orbit altitude or lower rpo_min_altitude.')
+    end
+
+end
+
+% Speed at apolune of the lower phasing orbit
+v_phase_apo = sqrt(muM*(2/ra_phase - 1/a_phase));
+
+% First RPO burn: reduce speed into lower phasing orbit
+vhat_rpo = v_rpo_circ_start / norm(v_rpo_circ_start);
+v_rpo_depart = v_phase_apo * vhat_rpo;
+
+dV_rpo_depart_vec = v_rpo_depart - v_rpo_circ_start;
+dV_rpo_depart = norm(dV_rpo_depart_vec);
+
+% Total RPO phasing time
+t_rpo = rpo_phase_revs * T_phase;
 
 time_rpo_start = time_circularization;
 t_rpo_start_mission = seconds(time_rpo_start - launch_date0);
 
-% First propagate Gateway. This is the truth target for rendezvous.
-[t_gateway, y_gateway] = ode45( ...
-    @(t,y) stateTwoBody(t,y,muM), ...
-    linspace(0,t_rpo,1200), ...
-    [r_gateway0; v_gateway0], ...
-    odeset('RelTol',1e-12,'AbsTol',1e-12));
-
-r_gateway_rendezvous = y_gateway(end,1:3).';
-v_gateway_rendezvous = y_gateway(end,4:6).';
-
-% Use provided Chase function to generate the spacecraft transfer velocity.
-% Chase should target the future Gateway state internally.
-[r_gateway_chase, v_rpo_depart, v_rpo_arrival_transfer, delVA_chase] = ...
-    Chase(r_rpo_start, v_rpo_circ_start, ...
-          r_gateway0, v_gateway0, ...
-          t_rpo, muM, chase_direction);
-
-r_gateway_chase = r_gateway_chase(:);
-v_rpo_depart = v_rpo_depart(:);
-v_rpo_arrival_transfer = v_rpo_arrival_transfer(:);
-
-% Propagate spacecraft along Chase transfer
+% Propagate spacecraft on phasing orbit
 [t_rpo_phase, y_rpo_phase] = ode45( ...
     @(t,y) stateTwoBody(t,y,muM), ...
     linspace(0,t_rpo,1200), ...
     [r_rpo_start; v_rpo_depart], ...
     odeset('RelTol',1e-12,'AbsTol',1e-12));
 
+% Propagate Gateway on circular orbit
+[t_gateway, y_gateway] = ode45( ...
+    @(t,y) stateTwoBody(t,y,muM), ...
+    linspace(0,t_rpo,1200), ...
+    [r_gateway0; v_gateway0], ...
+    odeset('RelTol',1e-12,'AbsTol',1e-12));
+
+% End states
 r_rpo_numerical_end = y_rpo_phase(end,1:3).';
 v_rpo_numerical_end = y_rpo_phase(end,4:6).';
 
-% Use the actual Gateway propagated endpoint as the rendezvous point.
-% This guarantees that the plotted rendezvous point lies on the Gateway orbit.
+r_gateway_rendezvous = y_gateway(end,1:3).';
+v_gateway_rendezvous = y_gateway(end,4:6).';
+
+% Use Gateway endpoint as the rendezvous point
 r_rendezvous = r_gateway_rendezvous;
 
-% Departure burn from circular orbit into Chase transfer
-dV_rpo_depart_vec = v_rpo_depart - v_rpo_circ_start;
-dV_rpo_depart = norm(dV_rpo_depart_vec);
-
-% Arrival burn: match Gateway velocity at the rendezvous point
+% Second RPO burn: circularize/match Gateway velocity
 v_rendezvous_after = v_gateway_rendezvous;
 
 dV_rpo_arrive_vec = v_rendezvous_after - v_rpo_numerical_end;
@@ -282,21 +315,40 @@ dV_rpo_arrive = norm(dV_rpo_arrive_vec);
 
 dV_RPO_total = dV_rpo_depart + dV_rpo_arrive;
 
-% Diagnostic errors
-rpo_position_error = norm(r_rpo_numerical_end - r_gateway_rendezvous);
-rpo_chase_target_error = norm(r_gateway_chase - r_gateway_rendezvous);
-rpo_radius_error = norm(r_rendezvous) - (RM + h_lunar_final);
-
 time_rendezvous = time_rpo_start + seconds(t_rpo);
 t_rendezvous_mission = seconds(time_rendezvous - launch_date0);
 
-%% ================================================================
-%  10B. DEORBIT AND LANDING BURN AFTER RENDEZVOUS
-% ================================================================
-% Start deorbit after rendezvous with Gateway.
+% Diagnostic errors
+rpo_position_error = norm(r_rpo_numerical_end - r_gateway_rendezvous);
+rpo_radius_error = norm(r_rendezvous) - (RM + h_lunar_final);
 
-r_deorbit = r_rendezvous;
-v_circ_before_deorbit = v_rendezvous_after;
+%% ================================================================
+%  10B. POST-RENDEZVOUS LOITER WITH GATEWAY
+% ================================================================
+% After rendezvous, spacecraft has matched Gateway velocity and coasts with
+% Gateway in the 100 km circular lunar orbit before deorbit.
+
+t_loiter = post_rendezvous_loiter_hr * 3600;
+
+[t_loiter_hist, y_loiter] = ode45( ...
+    @(t,y) stateTwoBody(t,y,muM), ...
+    linspace(0,t_loiter,600), ...
+    [r_rendezvous; v_rendezvous_after], ...
+    odeset('RelTol',1e-12,'AbsTol',1e-12));
+
+r_after_loiter = y_loiter(end,1:3).';
+v_after_loiter = y_loiter(end,4:6).';
+
+time_deorbit = time_rendezvous + seconds(t_loiter);
+t_deorbit_mission = seconds(time_deorbit - launch_date0);
+
+%% ================================================================
+%  10C. DEORBIT AND LANDING BURN AFTER GATEWAY LOITER
+% ================================================================
+% Start deorbit after loitering with Gateway.
+
+r_deorbit = r_after_loiter;
+v_circ_before_deorbit = v_after_loiter;
 
 r_deorbit_mag = norm(r_deorbit);
 
@@ -313,9 +365,6 @@ v_after_deorbit = v_deorbit_mag * vhat_deorbit;
 
 dV_deorbit_vec = v_after_deorbit - v_circ_before_deorbit;
 dV_deorbit = norm(dV_deorbit_vec);
-
-time_deorbit = time_rendezvous;
-t_deorbit_mission = seconds(time_deorbit - launch_date0);
 
 % Coast from apolune of the descent ellipse to the lunar surface
 t_to_landing = pi*sqrt(a_descent^3/muM);
@@ -449,7 +498,7 @@ legend('Earth', ...
        'TLI burn', ...
        'Location','best')
 
-%% 3. Moon-centered capture, circularization, RPO, and landing plot
+%% 3. Moon-centered capture, circularization, RPO, loiter, and landing plot
 figure
 hold on
 grid on
@@ -457,7 +506,7 @@ axis equal
 xlabel('x_M (km)')
 ylabel('y_M (km)')
 zlabel('z_M (km)')
-title('Moon-Centered Capture, RPO, Circularization, and Landing')
+title('Moon-Centered Capture, RPO, Loiter, and Landing')
 view(3)
 
 [xM,yM,zM] = sphere(60);
@@ -477,6 +526,9 @@ plot3(y_rpo_phase(:,1), y_rpo_phase(:,2), y_rpo_phase(:,3), ...
 plot3(y_gateway(:,1), y_gateway(:,2), y_gateway(:,3), ...
       'k--', 'LineWidth', 1.1)
 
+plot3(y_loiter(:,1), y_loiter(:,2), y_loiter(:,3), ...
+      'Color', [0.5 0.5 0.5], 'LineStyle', '-', 'LineWidth', 1.4)
+
 plot3(y_landing(:,1), y_landing(:,2), y_landing(:,3), ...
       'c-', 'LineWidth', 1.5)
 
@@ -493,7 +545,7 @@ plot3(r_rendezvous(1), r_rendezvous(2), r_rendezvous(3), ...
       'gs', 'MarkerFaceColor','g', 'MarkerSize', 7)
 
 plot3(r_deorbit(1), r_deorbit(2), r_deorbit(3), ...
-      'ko', 'MarkerFaceColor','k')
+      'ko', 'MarkerFaceColor','k', 'MarkerSize', 7)
 
 plot3(r_land(1), r_land(2), r_land(3), ...
       'ys', 'MarkerFaceColor','y', 'MarkerSize', 7)
@@ -501,6 +553,7 @@ plot3(r_land(1), r_land(2), r_land(3), ...
 moon_view_radius = max([capture_radius, ...
                         1.2*max(vecnorm(y_lunar_ellipse(:,1:3),2,2)), ...
                         1.2*max(vecnorm(y_rpo_phase(:,1:3),2,2)), ...
+                        1.2*max(vecnorm(y_loiter(:,1:3),2,2)), ...
                         1.2*max(vecnorm(y_landing(:,1:3),2,2))]);
 
 xlim([-moon_view_radius moon_view_radius])
@@ -510,14 +563,15 @@ zlim([-moon_view_radius moon_view_radius])
 legend('Moon actual size', ...
        'Captured lunar ellipse', ...
        '100 km circular orbit reference', ...
-       'RPO Chase trajectory', ...
+       'RPO phasing trajectory', ...
        'Gateway trajectory', ...
+       'Post-rendezvous loiter', ...
        'Descent trajectory', ...
        'Capture burn', ...
        'Circularization / RPO start', ...
        'Gateway initial position', ...
-       'Rendezvous on Gateway orbit', ...
-       'Deorbit burn', ...
+       'Rendezvous', ...
+       'Deorbit burn after loiter', ...
        'Landing burn / touchdown', ...
        'Location','best')
 
@@ -563,13 +617,21 @@ for k = 1:length(t_gateway)
     gateway_xy(k,:) = project2D(y_gateway(k,1:3).');
 end
 
+% Project loiter trajectory
+loiter_xy = zeros(length(t_loiter_hist),2);
+for k = 1:length(t_loiter_hist)
+    loiter_xy(k,:) = project2D(y_loiter(k,1:3).');
+end
+
 plot(rpo_xy(:,1), rpo_xy(:,2), 'b-', 'LineWidth', 1.6)
 plot(gateway_xy(:,1), gateway_xy(:,2), 'k--', 'LineWidth', 1.2)
+plot(loiter_xy(:,1), loiter_xy(:,2), '-', 'Color', [0.5 0.5 0.5], 'LineWidth', 1.4)
 
 r_rpo_start_xy = project2D(r_rpo_start);
 r_gateway0_xy = project2D(r_gateway0);
 r_rendezvous_xy = project2D(r_rendezvous);
 r_rpo_end_xy = project2D(r_rpo_numerical_end);
+r_deorbit_xy = project2D(r_deorbit);
 
 plot(r_rpo_start_xy(1), r_rpo_start_xy(2), ...
      'ro', 'MarkerFaceColor','r', 'MarkerSize', 7)
@@ -583,14 +645,19 @@ plot(r_rendezvous_xy(1), r_rendezvous_xy(2), ...
 plot(r_rpo_end_xy(1), r_rpo_end_xy(2), ...
      'bo', 'MarkerFaceColor','b', 'MarkerSize', 6)
 
+plot(r_deorbit_xy(1), r_deorbit_xy(2), ...
+     'ko', 'MarkerFaceColor','k', 'MarkerSize', 7)
+
 legend('Moon radius', ...
        '100 km lunar orbit', ...
-       'Spacecraft Chase trajectory', ...
+       'Spacecraft RPO phasing trajectory', ...
        'Gateway trajectory', ...
+       'Post-rendezvous loiter', ...
        'RPO departure', ...
        'Gateway initially 20 deg ahead', ...
        'Rendezvous point on Gateway orbit', ...
        'Propagated spacecraft endpoint', ...
+       'Deorbit after loiter', ...
        'Location','best')
 
 view(2)
@@ -631,7 +698,7 @@ zlim([r_land(3)-landing_zoom, r_land(3)+landing_zoom])
 
 legend('Moon actual size', ...
        'Descent trajectory', ...
-       'Deorbit burn', ...
+       'Deorbit burn after loiter', ...
        'Landing burn / touchdown', ...
        'Landing radial line', ...
        'Location','best')
@@ -671,18 +738,22 @@ fprintf('%-30s  MET = %10.3f hr   Date = %s\n', ...
 fprintf('%-30s  MET = %10.3f hr   Date = %s\n', ...
     'Gateway rendezvous', t_rendezvous_mission/3600, datestr(time_rendezvous))
 fprintf('%-30s  MET = %10.3f hr   Date = %s\n', ...
+    'End Gateway loiter', t_deorbit_mission/3600, datestr(time_deorbit))
+fprintf('%-30s  MET = %10.3f hr   Date = %s\n', ...
     'Deorbit burn', t_deorbit_mission/3600, datestr(time_deorbit))
 fprintf('%-30s  MET = %10.3f hr   Date = %s\n', ...
     'Landing burn / touchdown', t_landing_mission/3600, datestr(time_landing))
 
 fprintf('\nRPO Check:\n')
 fprintf('Gateway initial lead angle             = %.6f deg\n', gateway_phase_deg)
-fprintf('RPO Chase transfer time                = %.6f hr\n', t_rpo/3600)
+fprintf('RPO phasing revolutions                = %d\n', rpo_phase_revs)
+fprintf('RPO phasing time                       = %.6f hr\n', t_rpo/3600)
+fprintf('RPO phasing periapsis altitude         = %.6f km\n', rp_phase - RM)
+fprintf('Post-rendezvous loiter time            = %.6f hr\n', post_rendezvous_loiter_hr)
 fprintf('Rendezvous radius                      = %.6f km\n', norm(r_rendezvous))
 fprintf('Rendezvous altitude                    = %.6f km\n', norm(r_rendezvous) - RM)
 fprintf('Rendezvous radius error from 100 km orbit = %.6e km\n', rpo_radius_error)
-fprintf('Chase-returned target disagreement     = %.6f km\n', rpo_chase_target_error)
-fprintf('Spacecraft propagated endpoint error   = %.6f km\n', rpo_position_error)
+fprintf('Spacecraft endpoint error              = %.6f km\n', rpo_position_error)
 fprintf('Rendezvous velocity before arrival burn= %.6f km/s\n', norm(v_rpo_numerical_end - v_gateway_rendezvous))
 
 fprintf('\nLunar Orbit and Landing Check:\n')
